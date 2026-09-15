@@ -14,7 +14,7 @@ from vllm_omni.diffusion.models.mammoth_moda2.pipeline_mammothmoda2_dit import (
     MammothModa2DiTPipeline,
 )
 
-pytestmark = [pytest.mark.core_model, pytest.mark.diffusion]
+pytestmark = [pytest.mark.core_model, pytest.mark.cuda]
 
 
 def _tiny_config() -> OmniDiffusionConfig:
