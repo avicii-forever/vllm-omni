@@ -326,9 +326,11 @@ class MammothModa2DiTPipeline(nn.Module, SupportsComponentDiscovery):
 
         request_info = info if isinstance(info, dict) else {}
         extra_args = sampling.extra_args or {}
-        guidance = extra_args.get("text_guidance_scale")
-        if guidance is None:
-            guidance = sampling.guidance_scale if sampling.guidance_scale_provided else None
+        # Standard sampling fields take priority when the caller set them explicitly;
+        # the legacy extra_args aliases only act as a fallback so that deployment
+        # defaults (which always populate extra_args) never shadow a user-supplied
+        # guidance_scale / num_inference_steps.
+        guidance = sampling.guidance_scale if sampling.guidance_scale_provided else extra_args.get("text_guidance_scale")
         if guidance is None:
             guidance = _first_request_value(request_info.get("text_guidance_scale"))
         if guidance is None:
@@ -337,9 +339,9 @@ class MammothModa2DiTPipeline(nn.Module, SupportsComponentDiscovery):
             text_guidance_scale = float(guidance)
         except (TypeError, ValueError, OverflowError) as exc:
             raise ValueError(f"Invalid text_guidance_scale for request {request_id}") from exc
-        raw_num_inference_steps = extra_args.get("num_inference_steps")
+        raw_num_inference_steps = sampling.num_inference_steps
         if raw_num_inference_steps is None:
-            raw_num_inference_steps = sampling.num_inference_steps
+            raw_num_inference_steps = extra_args.get("num_inference_steps")
         if raw_num_inference_steps is None:
             raw_num_inference_steps = _first_request_value(request_info.get("num_inference_steps"))
         if raw_num_inference_steps is None:
