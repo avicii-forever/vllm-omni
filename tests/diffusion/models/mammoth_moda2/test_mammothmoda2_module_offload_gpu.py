@@ -78,3 +78,22 @@ def test_module_offload_disable_restores_weights() -> None:
     assert pipeline._model_cpu_offload_modules == []
     for name, tensor in pipeline.state_dict().items():
         torch.testing.assert_close(tensor.cpu(), master[name], rtol=0, atol=0)
+
+
+def test_module_offload_compact_vae_offloads_vae_after_decode() -> None:
+    _requires_cuda()
+    pipeline = _build_pipeline()
+    pipeline.enable_omni_model_cpu_offload(
+        device=torch.device("cuda:0"),
+        pin_memory=True,
+        use_hsdp=False,
+        offload_components=frozenset({"dit", "vae"}),
+    )
+    # The DiT begins offloaded; the VAE is staged out only when the DiT runs.
+    # Exercising the component context (as forward does around decode) must
+    # re-offload the VAE on exit because it is a selected offload target.
+    assert next(pipeline.gen_transformer.parameters()).device.type == "cpu"
+    assert next(pipeline.gen_vae.parameters()).device.type == "cuda"
+    with pipeline._component_on_device(pipeline.gen_vae):
+        assert next(pipeline.gen_vae.parameters()).device.type == "cuda"
+    assert next(pipeline.gen_vae.parameters()).device.type == "cpu"

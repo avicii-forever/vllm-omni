@@ -28,11 +28,13 @@ from vllm_omni.diffusion.offloader import (
 from vllm_omni.diffusion.offloader.config import (
     DIT_COMPONENT,
     TEXT_ENCODER_COMPONENT,
+    VAE_COMPONENT,
     OffloadStrategy,
     resolve_offload,
 )
 from vllm_omni.diffusion.offloader.module_collector import ModuleDiscovery
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
+from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 from vllm_omni.transformers_utils.configs.mammoth_moda2 import Mammothmoda2Config
 
 from .mammothmoda2_dit_model import SimpleQFormerImageRefiner, Transformer2DModel
@@ -208,32 +210,72 @@ class MammothModa2DiTPipeline(nn.Module, SupportsComponentDiscovery):
         prompt = req.prompts[0]
         prompt = prompt if isinstance(prompt, dict) else {}
         info = prompt.get("additional_information")
+
+        full_hidden_states, full_token_ids, answer_start_index = self._parse_ar_conditions(req, request_id, info)
+        height, width = self._resolve_image_size(prompt, sampling, request_id)
+        text_guidance_scale, num_inference_steps, cfg_range = self._parse_sampling(sampling, request_id)
+
+        generator = sampling.generator
+        if isinstance(generator, list) and len(generator) != 1:
+            raise ValueError(
+                f"MammothModa2 single-output request mode requires exactly one generator for request {request_id}"
+            )
+
+        return _MammothRequest(
+            request_id=request_id,
+            full_hidden_states=full_hidden_states,
+            full_token_ids=full_token_ids,
+            answer_start_index=answer_start_index,
+            height=height,
+            width=width,
+            text_guidance_scale=text_guidance_scale,
+            cfg_range=cfg_range,
+            num_inference_steps=num_inference_steps,
+            seed=sampling.seed,
+            generator=generator,
+        )
+
+    def _parse_ar_conditions(
+        self,
+        req: DiffusionRequestBatch,
+        request_id: str,
+        info: object,
+    ) -> tuple[torch.Tensor, list[int], int]:
+        """Extract and validate AR-stage conditions, or synthesize the dummy run."""
         if req.is_dummy_run():
             full_hidden_states = torch.zeros((2, self._llm_hidden_size), dtype=torch.float32, device="cpu")
             full_token_ids = [0, int(self.config.llm_config.gen_vocab_start_index)]
-            answer_start_index = 1
-        else:
-            if not isinstance(info, dict):
-                raise ValueError(f"Missing additional_information AR conditions for request {request_id}")
-            full_hidden_states = info.get("full_hidden_states")
-            full_token_ids = info.get("full_token_ids")
-            if not isinstance(full_hidden_states, torch.Tensor) or not isinstance(full_token_ids, list):
-                raise ValueError(f"Expected full_hidden_states tensor and full_token_ids list for request {request_id}")
-            try:
-                answer_start_index = int(info.get("answer_start_index"))
-            except (TypeError, ValueError, OverflowError) as exc:
-                raise ValueError(f"Invalid answer_start_index for request {request_id}") from exc
-            if full_hidden_states.ndim != 2:
-                raise ValueError(f"Expected 2D full_hidden_states for request {request_id}")
-            if full_hidden_states.shape[0] != len(full_token_ids):
-                raise ValueError(f"AR hidden-state/token-count mismatch for request {request_id}")
-            if not 0 <= answer_start_index <= len(full_token_ids):
-                raise ValueError(f"answer_start_index outside token range for request {request_id}")
-            try:
-                full_token_ids = [int(token_id) for token_id in full_token_ids]
-            except (TypeError, ValueError, OverflowError) as exc:
-                raise ValueError(f"Invalid full_token_ids for request {request_id}") from exc
+            return full_hidden_states, full_token_ids, 1
 
+        if not isinstance(info, dict):
+            raise ValueError(f"Missing additional_information AR conditions for request {request_id}")
+        full_hidden_states = info.get("full_hidden_states")
+        full_token_ids = info.get("full_token_ids")
+        if not isinstance(full_hidden_states, torch.Tensor) or not isinstance(full_token_ids, list):
+            raise ValueError(f"Expected full_hidden_states tensor and full_token_ids list for request {request_id}")
+        try:
+            answer_start_index = int(info.get("answer_start_index"))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"Invalid answer_start_index for request {request_id}") from exc
+        if full_hidden_states.ndim != 2:
+            raise ValueError(f"Expected 2D full_hidden_states for request {request_id}")
+        if full_hidden_states.shape[0] != len(full_token_ids):
+            raise ValueError(f"AR hidden-state/token-count mismatch for request {request_id}")
+        if not 0 <= answer_start_index <= len(full_token_ids):
+            raise ValueError(f"answer_start_index outside token range for request {request_id}")
+        try:
+            full_token_ids = [int(token_id) for token_id in full_token_ids]
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"Invalid full_token_ids for request {request_id}") from exc
+        return full_hidden_states, full_token_ids, answer_start_index
+
+    def _resolve_image_size(
+        self,
+        prompt: dict,
+        sampling: OmniDiffusionSamplingParams,
+        request_id: str,
+    ) -> tuple[int, int]:
+        """Resolve the output image size from prompt, sampling, then the default."""
         dimensions = []
         for name in ("height", "width"):
             value = DiffusionRequestBatch.get_prompt_field(prompt, name)
@@ -250,19 +292,31 @@ class MammothModa2DiTPipeline(nn.Module, SupportsComponentDiscovery):
             raise ValueError(f"Invalid image size: {height}x{width} for request {request_id}")
         if height % 16 != 0 or width % 16 != 0:
             raise ValueError(f"Image size must be multiples of 16, got {height}x{width} for request {request_id}")
+        return height, width
 
+    def _parse_sampling(
+        self,
+        sampling: OmniDiffusionSamplingParams,
+        request_id: str,
+    ) -> tuple[float, int, tuple[float, float]]:
+        """Resolve guidance scale, step count, and CFG range from sampling params."""
         extra_args = sampling.extra_args or {}
         # Standard sampling fields take priority when the caller set them explicitly;
         # the legacy extra_args aliases only act as a fallback so that deployment
         # defaults (which always populate extra_args) never shadow a user-supplied
         # guidance_scale / num_inference_steps.
-        guidance = sampling.guidance_scale if sampling.guidance_scale_provided else extra_args.get("text_guidance_scale")
+        guidance = (
+            sampling.guidance_scale
+            if sampling.guidance_scale_provided
+            else extra_args.get("text_guidance_scale")
+        )
         if guidance is None:
             guidance = 9.0
         try:
             text_guidance_scale = float(guidance)
         except (TypeError, ValueError, OverflowError) as exc:
             raise ValueError(f"Invalid text_guidance_scale for request {request_id}") from exc
+
         raw_num_inference_steps = sampling.num_inference_steps
         if raw_num_inference_steps is None:
             raw_num_inference_steps = extra_args.get("num_inference_steps")
@@ -274,6 +328,7 @@ class MammothModa2DiTPipeline(nn.Module, SupportsComponentDiscovery):
             raise ValueError(f"Invalid num_inference_steps for request {request_id}") from exc
         if num_inference_steps <= 0:
             raise ValueError(f"num_inference_steps must be positive for request {request_id}")
+
         cfg_range = extra_args.get("cfg_range")
         if cfg_range is None:
             cfg_range = [0.0, 1.0]
@@ -285,26 +340,7 @@ class MammothModa2DiTPipeline(nn.Module, SupportsComponentDiscovery):
             raise ValueError(f"cfg_range requires two values convertible to floats for request {request_id}") from exc
         if not 0 <= cfg_start <= cfg_end <= 1:
             raise ValueError(f"cfg_range must satisfy 0 <= start <= end <= 1 for request {request_id}")
-
-        generator = sampling.generator
-        if isinstance(generator, list) and len(generator) != 1:
-            raise ValueError(
-                f"MammothModa2 single-output request mode requires exactly one generator for request {request_id}"
-            )
-
-        return _MammothRequest(
-            request_id=request_id,
-            full_hidden_states=full_hidden_states,
-            full_token_ids=full_token_ids,
-            answer_start_index=answer_start_index,
-            height=height,
-            width=width,
-            text_guidance_scale=text_guidance_scale,
-            cfg_range=(cfg_start, cfg_end),
-            num_inference_steps=num_inference_steps,
-            seed=sampling.seed,
-            generator=generator,
-        )
+        return text_guidance_scale, num_inference_steps, (cfg_start, cfg_end)
 
     def _split_ar_conditions(
         self,
@@ -511,11 +547,16 @@ class MammothModa2DiTPipeline(nn.Module, SupportsComponentDiscovery):
                 raise ValueError("MammothModa2 has no loaded DiT for selected module offload")
             if TEXT_ENCODER_COMPONENT in offload_components and not components.encoders:
                 raise ValueError("MammothModa2 has no loaded text encoder for selected module offload")
+            if VAE_COMPONENT in offload_components and not components.vaes:
+                raise ValueError("MammothModa2 has no loaded VAE for selected module offload")
+            selected_stages: list[nn.Module] = []
+            if TEXT_ENCODER_COMPONENT in offload_components:
+                selected_stages.extend(components.encoders)
+            if VAE_COMPONENT in offload_components:
+                selected_stages.extend(components.vaes)
             selection_options = {
                 "offload_dit_modules": dits if DIT_COMPONENT in offload_components else (),
-                "offload_encoder_modules": (
-                    components.encoders if TEXT_ENCODER_COMPONENT in offload_components else ()
-                ),
+                "offload_encoder_modules": selected_stages,
             }
         apply_sequential_offload(
             dit_modules=dits,

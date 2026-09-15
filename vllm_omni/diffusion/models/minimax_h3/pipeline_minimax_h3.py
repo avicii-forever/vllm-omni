@@ -55,6 +55,7 @@ from vllm_omni.diffusion.offloader import (
 from vllm_omni.diffusion.offloader.config import (
     DIT_COMPONENT,
     TEXT_ENCODER_COMPONENT,
+    VAE_COMPONENT,
     OffloadStrategy,
     resolve_offload,
     should_offload_component,
@@ -1588,6 +1589,11 @@ class MiniMaxH3Pipeline(
         modules = [*dits, *stages]
         selection_options: dict[str, Any] = {}
         if offload_components is not None:
+            if VAE_COMPONENT in offload_components:
+                raise ValueError(
+                    "MiniMax-H3 module offload stages its VAEs through the compatibility "
+                    "topology; the compact selector does not support the 'vae' component"
+                )
             if DIT_COMPONENT in offload_components and not dits:
                 raise ValueError("MiniMax-H3 has no loaded DiT for selected module offload")
             if TEXT_ENCODER_COMPONENT in offload_components and not components.encoders:
