@@ -94,6 +94,15 @@ def test_module_mode_honors_component_selection() -> None:
     assert dit_only.offloads("text_encoder") is False
 
 
+def test_module_mode_honors_vae_component_selection() -> None:
+    dit_vae = OffloadConfig.from_od_config(
+        _module_config(diffusion_offload_config={"mode": "module", "components": ["dit", "vae"]})
+    )
+    assert dit_vae.offloads("dit") is True
+    assert dit_vae.offloads("vae") is True
+    assert dit_vae.offloads("text_encoder") is False
+
+
 def test_module_mode_admission_passes_for_preview_single_request() -> None:
     od_config = _module_config()
     config = _build_mammoth_config(od_config)
@@ -135,6 +144,35 @@ def test_enable_model_offload_stages_dit_encoder_and_vae(monkeypatch) -> None:
         pipeline.gen_image_condition_refiner,
         pipeline.gen_vae,
     ]
+
+
+def test_enable_model_offload_selects_vae_for_compact_config(monkeypatch) -> None:
+    pipeline = _pipeline_shell()
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        "vllm_omni.diffusion.models.mammoth_moda2.pipeline_mammothmoda2_dit.apply_sequential_offload",
+        lambda **kwargs: captured.update(kwargs),
+    )
+    pipeline.enable_omni_model_cpu_offload(
+        device=torch.device("cpu"),
+        pin_memory=True,
+        use_hsdp=False,
+        offload_components=frozenset({"dit", "vae"}),
+    )
+    assert captured["offload_dit_modules"] == [pipeline.gen_transformer]
+    assert captured["offload_encoder_modules"] == [pipeline.gen_vae]
+
+
+def test_enable_model_offload_rejects_vae_without_vae_module() -> None:
+    pipeline = _pipeline_shell()
+    pipeline.gen_vae = None
+    with pytest.raises(ValueError, match="no loaded VAE"):
+        pipeline.enable_omni_model_cpu_offload(
+            device=torch.device("cpu"),
+            pin_memory=True,
+            use_hsdp=False,
+            offload_components=frozenset({"dit", "vae"}),
+        )
 
 
 def test_disable_model_offload_removes_hooks(monkeypatch) -> None:
