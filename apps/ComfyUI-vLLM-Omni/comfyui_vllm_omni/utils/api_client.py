@@ -373,13 +373,6 @@ class VLLMOmniClient:
             if video_mask is None and audio_mask is None:
                 raise ValueError("Latent-mask editing requires at least one mask.")
 
-            video_mask_trivial = video_mask is None or bool((video_mask == 1.0).all().item())
-            audio_mask_trivial = audio_mask is None or audio_mask == 1.0
-            if not video_mask_trivial and source_video is None:
-                raise ValueError("A non-trivial video mask requires a source video.")
-            if not audio_mask_trivial and source_audio is None and source_video is None:
-                raise ValueError("A non-trivial audio mask requires a source audio or a source video with audio.")
-
             if source_video is not None:
                 form.add_field(
                     "source_video",
