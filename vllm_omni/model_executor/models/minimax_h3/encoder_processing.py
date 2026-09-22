@@ -294,6 +294,7 @@ def _canonical_video_edit_mask(
     latent_t: int,
     latent_h: int,
     latent_w: int,
+    num_frames: int | None = None,
 ) -> torch.Tensor:
     """Normalize every accepted request shape to one full latent grid.
 
@@ -321,7 +322,13 @@ def _canonical_video_edit_mask(
             break
         candidate = candidate.squeeze(0)
     if candidate.ndim in (2, 3):
-        return _resize_video_edit_mask(candidate, latent_t=latent_t, latent_h=latent_h, latent_w=latent_w)
+        return _resize_video_edit_mask(
+            candidate,
+            latent_t=latent_t,
+            latent_h=latent_h,
+            latent_w=latent_w,
+            num_frames=num_frames,
+        )
     raise OmniClientError(
         "MiniMax H3 video_noise_mask shape must be "
         f"scalar, ({row_count},), {token_shape}, {full_shape}, [H, W], or [T, H, W]; got {tuple(mask.shape)}"
@@ -334,21 +341,24 @@ def _resize_video_edit_mask(
     latent_t: int,
     latent_h: int,
     latent_w: int,
+    num_frames: int | None = None,
 ) -> torch.Tensor:
     """Resize a raw spatial ``[H, W]`` or frame-space ``[T, H, W]`` mask to the
     full latent grid ``[latent_t, latent_h, latent_w]``.
 
-    Spatial axes are area-resized to the latent canvas; the temporal axis is
-    max-pooled so a regenerate (``1.0``) wins over a preserve (``0.0``) within
-    each pooled window. Uniform pooling approximates the VAE's non-uniform
-    frame grouping (first 5 frames -> 2 latents, then every 17 -> 5); the exact
-    frame->latent map lives in the external VAE.
+    Spatial axes are area-resized to the latent canvas. A frame-space mask with
+    ``T == num_frames`` is max-pooled along time following the VAE's non-uniform
+    grouping (first 5 frames -> 2 latents, then every 17 -> 5), so a regenerate
+    (``1.0``) wins within each group. Other temporal depths fall back to uniform
+    max-pooling (downsample) or nearest-neighbour (upsample).
     """
     if mask.ndim == 2:
         mask = mask.unsqueeze(0)  # [1, H, W] -> [1, latent_h, latent_w] below
     grid = torch.nn.functional.interpolate(mask.unsqueeze(1), size=(latent_h, latent_w), mode="area").squeeze(1)
     if grid.shape[0] == 1:
         grid = grid.expand(latent_t, latent_h, latent_w)
+    elif num_frames is not None and grid.shape[0] == num_frames:
+        grid = _temporal_group_max_pool(grid, latent_t=latent_t)
     elif grid.shape[0] > latent_t:
         grid = torch.nn.functional.adaptive_max_pool3d(grid[None, None], (latent_t, latent_h, latent_w)).squeeze(0).squeeze(0)
     elif grid.shape[0] < latent_t:
@@ -356,6 +366,31 @@ def _resize_video_edit_mask(
             grid.unsqueeze(0).unsqueeze(0), size=(latent_t, latent_h, latent_w), mode="nearest"
         ).squeeze(0).squeeze(0)
     return grid.contiguous()
+
+
+def _temporal_group_max_pool(mask: torch.Tensor, *, latent_t: int) -> torch.Tensor:
+    """Max-pool ``[num_frames, H, W]`` -> ``[latent_t, H, W]`` following the
+    VAE's non-uniform frame grouping: the first 5 frames map to 2 latents, then
+    every 17 frames map to 5 latents.
+
+    Within each group the frames are split into contiguous chunks and max-pooled
+    (a regenerate ``1.0`` wins over a preserve ``0.0``). This mirrors the VAE's
+    batch structure (``preencode_batch_frames == 17`` and the 5-frame causal
+    warmup); the exact within-group frame->latent assignment lives in the
+    external VAE, so the chunk boundaries are an approximation.
+    """
+    pooled: list[torch.Tensor] = []
+    for chunk in torch.chunk(mask[:5], 2, dim=0):
+        pooled.append(chunk.amax(dim=0))
+    for start in range(5, mask.shape[0], 17):
+        for chunk in torch.chunk(mask[start : start + 17], 5, dim=0):
+            pooled.append(chunk.amax(dim=0))
+    result = torch.stack(pooled)
+    if result.shape[0] != latent_t:
+        raise OmniClientError(
+            f"MiniMax H3 video_noise_mask temporal depth {mask.shape[0]} does not map to {latent_t} latents"
+        )
+    return result
 
 
 def _canonical_audio_edit_mask(value: Any, *, audio_t: int) -> torch.Tensor:
@@ -515,6 +550,7 @@ def prepare_encoder_inputs(
             latent_t=latent_t,
             latent_h=height // 16,
             latent_w=width // 16,
+            num_frames=num_frames,
         )
         if raw_video_edit_mask is not None
         else None

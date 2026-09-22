@@ -55,12 +55,16 @@ def test_edit_mask_resizes_raw_spatial_and_frame_space_masks() -> None:
     assert spatial_grid.shape == (7, 8, 12)
     torch.testing.assert_close(spatial_grid, torch.full((7, 8, 12), 0.5))
 
-    # Raw frame-space [T, H, W]: a lone regenerate frame survives the temporal max-pool.
+    # Raw frame-space [T, H, W] with T == num_frames: max-pooled by the VAE's
+    # non-uniform grouping (first 5 frames -> 2 latents, then every 17 -> 5).
     frame_space = torch.zeros(22, 16, 24)
-    frame_space[7] = 1.0
-    frame_grid = _canonical_video_edit_mask(frame_space, **video_kwargs)
+    frame_space[7] = 1.0  # inside the first steady-state group (frames [5, 9))
+    frame_grid = _canonical_video_edit_mask(frame_space, num_frames=22, **video_kwargs)
     assert frame_grid.shape == (7, 8, 12)
-    assert bool(torch.any(frame_grid > 0.5).item())
+    # The regenerate frame lands in latent index 2 (warmup covers latents 0, 1).
+    assert bool(torch.all(frame_grid[2] > 0.5).item())
+    assert bool(torch.all(frame_grid[0] == 0.0).item())
+    assert bool(torch.all(frame_grid[1] == 0.0).item())
 
 
 @pytest.mark.parametrize(
