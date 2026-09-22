@@ -394,7 +394,13 @@ def _temporal_group_max_pool(mask: torch.Tensor, *, latent_t: int) -> torch.Tens
 
 
 def _canonical_audio_edit_mask(value: Any, *, audio_t: int) -> torch.Tensor:
-    """Normalize every accepted request shape to a channel-major grid."""
+    """Normalize every accepted request shape to a channel-major grid.
+
+    Besides the canonical scalar/``(audio_t,)``/``(2, audio_t)``/``(2*audio_t,)``
+    forms, a raw temporal ``[T]`` mask (one value per time step) and a raw
+    channel-major ``[C, T]`` mask are accepted and resized to ``(2, audio_t)``
+    here, so clients do not need to mirror the audio latent length.
+    """
     mask = _edit_mask(value, name="audio_noise_mask")
     row_count = 2 * audio_t
     candidate = mask
@@ -410,10 +416,39 @@ def _canonical_audio_edit_mask(value: Any, *, audio_t: int) -> torch.Tensor:
         if not candidate.ndim or candidate.shape[0] != 1:
             break
         candidate = candidate.squeeze(0)
+    if candidate.ndim in (1, 2):
+        return _resize_audio_edit_mask(candidate, audio_t=audio_t)
     raise OmniClientError(
         "MiniMax H3 audio_noise_mask shape must be "
-        f"scalar, ({audio_t},), (2, {audio_t}), or ({row_count},); got {tuple(mask.shape)}"
+        f"scalar, ({audio_t},), (2, {audio_t}), ({row_count},), [T], or [C, T]; got {tuple(mask.shape)}"
     )
+
+
+def _resize_audio_edit_mask(mask: torch.Tensor, *, audio_t: int) -> torch.Tensor:
+    """Resize a raw temporal ``[T]`` or channel-major ``[C, T]`` audio mask to
+    ``(2, audio_t)``.
+
+    The temporal axis is uniformly resampled to ``audio_t`` (max-pool when
+    downsampling so a regenerate ``1.0`` wins; nearest-neighbour when
+    upsampling), and a single channel is broadcast to the stereo pair.
+    """
+    if mask.ndim == 1:
+        mask = mask.unsqueeze(0)  # [1, T]
+    if mask.shape[1] == audio_t:
+        grid = mask
+    elif mask.shape[1] > audio_t:
+        grid = torch.nn.functional.adaptive_max_pool1d(mask.unsqueeze(0), audio_t).squeeze(0)
+    else:
+        grid = torch.nn.functional.interpolate(
+            mask.unsqueeze(0), size=(audio_t,), mode="nearest"
+        ).squeeze(0)
+    if grid.shape[0] == 1:
+        grid = grid.expand(2, audio_t)
+    elif grid.shape[0] != 2:
+        raise OmniClientError(
+            f"MiniMax H3 audio_noise_mask must have 1 or 2 channels, got {grid.shape[0]}"
+        )
+    return grid.contiguous()
 
 
 def _fit_audio_edit_rows(

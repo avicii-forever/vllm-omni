@@ -67,6 +67,29 @@ def test_edit_mask_resizes_raw_spatial_and_frame_space_masks() -> None:
     assert bool(torch.all(frame_grid[1] == 0.0).item())
 
 
+def test_edit_mask_resizes_raw_temporal_audio_masks() -> None:
+    audio_t = 178  # ~4.458 s at 40 latent steps per second
+
+    # Raw temporal [T]: a regenerate step survives the downsampling max-pool.
+    temporal = torch.zeros(300)
+    temporal[150] = 1.0
+    grid = _canonical_audio_edit_mask(temporal, audio_t=audio_t)
+    assert grid.shape == (2, audio_t)
+    assert bool(torch.any(grid > 0.5).item())
+
+    # Channel-major [1, T] is broadcast to the stereo pair.
+    mono = torch.zeros(1, 100)
+    mono[0, 50] = 0.8
+    mono_grid = _canonical_audio_edit_mask(mono, audio_t=audio_t)
+    assert mono_grid.shape == (2, audio_t)
+    assert bool(torch.any(mono_grid > 0.5).item())
+
+    # Exact-length [2, audio_t] passes through unchanged.
+    stereo = torch.zeros(2, audio_t)
+    stereo[1, 10] = 0.7
+    torch.testing.assert_close(_canonical_audio_edit_mask(stereo, audio_t=audio_t), stereo)
+
+
 @pytest.mark.parametrize(
     ("canonicalize", "value", "kwargs", "message"),
     [
