@@ -360,11 +360,19 @@ def _resize_video_edit_mask(
     elif num_frames is not None and grid.shape[0] == num_frames:
         grid = _temporal_group_max_pool(grid, latent_t=latent_t)
     elif grid.shape[0] > latent_t:
-        grid = torch.nn.functional.adaptive_max_pool3d(grid[None, None], (latent_t, latent_h, latent_w)).squeeze(0).squeeze(0)
+        grid = (
+            torch.nn.functional.adaptive_max_pool3d(grid[None, None], (latent_t, latent_h, latent_w))
+            .squeeze(0)
+            .squeeze(0)
+        )
     elif grid.shape[0] < latent_t:
-        grid = torch.nn.functional.interpolate(
-            grid.unsqueeze(0).unsqueeze(0), size=(latent_t, latent_h, latent_w), mode="nearest"
-        ).squeeze(0).squeeze(0)
+        grid = (
+            torch.nn.functional.interpolate(
+                grid.unsqueeze(0).unsqueeze(0), size=(latent_t, latent_h, latent_w), mode="nearest"
+            )
+            .squeeze(0)
+            .squeeze(0)
+        )
     return grid.contiguous()
 
 
@@ -442,15 +450,11 @@ def _resize_audio_edit_mask(mask: torch.Tensor, *, audio_t: int) -> torch.Tensor
     elif mask.shape[1] > audio_t:
         grid = torch.nn.functional.adaptive_max_pool1d(mask.unsqueeze(0), audio_t).squeeze(0)
     else:
-        grid = torch.nn.functional.interpolate(
-            mask.unsqueeze(0), size=(audio_t,), mode="nearest"
-        ).squeeze(0)
+        grid = torch.nn.functional.interpolate(mask.unsqueeze(0), size=(audio_t,), mode="nearest").squeeze(0)
     if grid.shape[0] == 1:
         grid = grid.expand(2, audio_t)
     elif grid.shape[0] != 2:
-        raise OmniClientError(
-            f"MiniMax H3 audio_noise_mask must have 1 or 2 channels, got {grid.shape[0]}"
-        )
+        raise OmniClientError(f"MiniMax H3 audio_noise_mask must have 1 or 2 channels, got {grid.shape[0]}")
     return grid.contiguous()
 
 
