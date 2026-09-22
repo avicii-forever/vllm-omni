@@ -58,11 +58,11 @@ def test_edit_mask_resizes_raw_spatial_and_frame_space_masks() -> None:
     # Raw frame-space [T, H, W] with T == num_frames: max-pooled by the VAE's
     # temporal structure (pad to 17, stride-4 into 5 tokens, drop the last 3).
     frame_space = torch.zeros(22, 16, 24)
-    frame_space[7] = 1.0  # stride 4: frame 7 -> token 1 (frames [4, 8))
+    frame_space[7] = 1.0  # causal: frame 7 -> token 2 (frames [5, 9))
     frame_grid = _canonical_video_edit_mask(frame_space, num_frames=22, **video_kwargs)
     assert frame_grid.shape == (7, 8, 12)
-    # The regenerate frame lands in latent index 1.
-    assert bool(torch.all(frame_grid[1] > 0.5).item())
+    # The regenerate frame lands in latent index 2.
+    assert bool(torch.all(frame_grid[2] > 0.5).item())
     assert bool(torch.all(frame_grid[0] == 0.0).item())
 
 
@@ -635,3 +635,48 @@ def test_driving_audio_does_not_override_fl2va_task_inference():
     assert prepared.media.task == "fl2va"
     assert prepared.media.audio_mode == "lock_source"
     assert prepared.condition_labels == [("image", 1)]
+
+
+def test_audio_edit_mask_rejects_three_channels() -> None:
+    from vllm_omni.errors import OmniClientError
+
+    with pytest.raises(OmniClientError, match="1 or 2 channels"):
+        _canonical_audio_edit_mask(torch.zeros(3, 100), audio_t=37)
+
+
+def test_temporal_group_max_pool_rejects_count_mismatch() -> None:
+    from vllm_omni.errors import OmniClientError
+    from vllm_omni.model_executor.models.minimax_h3.encoder_processing import (
+        _temporal_group_max_pool,
+    )
+
+    # 34 frames -> 7 tokens; asking for a different latent_t must fail.
+    with pytest.raises(OmniClientError, match="does not map"):
+        _temporal_group_max_pool(torch.zeros(34, 1, 1), latent_t=6)
+
+
+def test_video_edit_mask_aligns_frame_space_mask_to_num_frames() -> None:
+    video_kwargs = {"latent_t": 7, "latent_h": 8, "latent_w": 12}
+    # 17-frame mask against a 22-frame request: pad (clone tail) then causal pool.
+    mask = torch.zeros(17, 16, 24)
+    mask[0] = 1.0  # frame 0 -> token 0
+    grid = _canonical_video_edit_mask(mask, num_frames=22, **video_kwargs)
+    assert grid.shape == (7, 8, 12)
+    assert bool(torch.all(grid[0] > 0.5).item())
+    assert bool(torch.all(grid[1] == 0.0).item())
+
+
+def test_temporal_group_max_pool_causal_boundaries() -> None:
+    from vllm_omni.model_executor.models.minimax_h3.encoder_processing import (
+        _temporal_group_max_pool,
+    )
+
+    def lit(frame: int) -> list[int]:
+        mask = torch.zeros(34, 1, 1)
+        mask[frame] = 1.0
+        out = _temporal_group_max_pool(mask, latent_t=7)
+        return [i for i in range(out.shape[0]) if out[i, 0, 0].item() > 0]
+
+    assert lit(0) == [0]  # frame 0 -> token 0 only
+    assert lit(4) == [1]  # frame 4 -> token 1 (frames 1..4)
+    assert lit(5) == [2]  # frame 5 -> token 2 (frames 5..8)
