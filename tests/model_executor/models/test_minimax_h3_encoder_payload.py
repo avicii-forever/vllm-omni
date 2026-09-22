@@ -46,6 +46,23 @@ def test_edit_mask_boundary_canonicalizes_supported_request_shapes() -> None:
     )
 
 
+def test_edit_mask_resizes_raw_spatial_and_frame_space_masks() -> None:
+    video_kwargs = {"latent_t": 7, "latent_h": 8, "latent_w": 12}
+
+    # Raw spatial [H, W]: area-resized to the latent canvas and broadcast over time.
+    spatial = torch.full((16, 24), 0.5)
+    spatial_grid = _canonical_video_edit_mask(spatial, **video_kwargs)
+    assert spatial_grid.shape == (7, 8, 12)
+    torch.testing.assert_close(spatial_grid, torch.full((7, 8, 12), 0.5))
+
+    # Raw frame-space [T, H, W]: a lone regenerate frame survives the temporal max-pool.
+    frame_space = torch.zeros(22, 16, 24)
+    frame_space[7] = 1.0
+    frame_grid = _canonical_video_edit_mask(frame_space, **video_kwargs)
+    assert frame_grid.shape == (7, 8, 12)
+    assert bool(torch.any(frame_grid > 0.5).item())
+
+
 @pytest.mark.parametrize(
     ("canonicalize", "value", "kwargs", "message"),
     [

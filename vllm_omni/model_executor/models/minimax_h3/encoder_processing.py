@@ -295,7 +295,14 @@ def _canonical_video_edit_mask(
     latent_h: int,
     latent_w: int,
 ) -> torch.Tensor:
-    """Normalize every accepted request shape to one full latent grid."""
+    """Normalize every accepted request shape to one full latent grid.
+
+    Besides the canonical scalar/``(row_count,)``/``token_shape``/``full_shape``
+    forms, a raw spatial ``[H, W]`` mask (broadcast over time) and a raw
+    frame-space ``[T, H, W]`` mask (one slice per source frame) are accepted and
+    resized to the latent grid here, so clients do not need to mirror the H3
+    shape lattice.
+    """
     mask = _edit_mask(value, name="video_noise_mask")
     token_shape = (latent_t, latent_h // 2, latent_w // 2)
     full_shape = (latent_t, latent_h, latent_w)
@@ -313,10 +320,42 @@ def _canonical_video_edit_mask(
         if not candidate.ndim or candidate.shape[0] != 1:
             break
         candidate = candidate.squeeze(0)
+    if candidate.ndim in (2, 3):
+        return _resize_video_edit_mask(candidate, latent_t=latent_t, latent_h=latent_h, latent_w=latent_w)
     raise OmniClientError(
         "MiniMax H3 video_noise_mask shape must be "
-        f"scalar, ({row_count},), {token_shape}, or {full_shape}; got {tuple(mask.shape)}"
+        f"scalar, ({row_count},), {token_shape}, {full_shape}, [H, W], or [T, H, W]; got {tuple(mask.shape)}"
     )
+
+
+def _resize_video_edit_mask(
+    mask: torch.Tensor,
+    *,
+    latent_t: int,
+    latent_h: int,
+    latent_w: int,
+) -> torch.Tensor:
+    """Resize a raw spatial ``[H, W]`` or frame-space ``[T, H, W]`` mask to the
+    full latent grid ``[latent_t, latent_h, latent_w]``.
+
+    Spatial axes are area-resized to the latent canvas; the temporal axis is
+    max-pooled so a regenerate (``1.0``) wins over a preserve (``0.0``) within
+    each pooled window. Uniform pooling approximates the VAE's non-uniform
+    frame grouping (first 5 frames -> 2 latents, then every 17 -> 5); the exact
+    frame->latent map lives in the external VAE.
+    """
+    if mask.ndim == 2:
+        mask = mask.unsqueeze(0)  # [1, H, W] -> [1, latent_h, latent_w] below
+    grid = torch.nn.functional.interpolate(mask.unsqueeze(1), size=(latent_h, latent_w), mode="area").squeeze(1)
+    if grid.shape[0] == 1:
+        grid = grid.expand(latent_t, latent_h, latent_w)
+    elif grid.shape[0] > latent_t:
+        grid = torch.nn.functional.adaptive_max_pool3d(grid[None, None], (latent_t, latent_h, latent_w)).squeeze(0).squeeze(0)
+    elif grid.shape[0] < latent_t:
+        grid = torch.nn.functional.interpolate(
+            grid.unsqueeze(0).unsqueeze(0), size=(latent_t, latent_h, latent_w), mode="nearest"
+        ).squeeze(0).squeeze(0)
+    return grid.contiguous()
 
 
 def _canonical_audio_edit_mask(value: Any, *, audio_t: int) -> torch.Tensor:
