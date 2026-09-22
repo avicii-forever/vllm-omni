@@ -378,13 +378,17 @@ def _resize_video_edit_mask(
 
 def _temporal_group_max_pool(mask: torch.Tensor, *, latent_t: int) -> torch.Tensor:
     """Max-pool ``[num_frames, H, W]`` -> ``[latent_t, H, W]`` following the
-    VAE's exact temporal structure: pad to a multiple of 17 frames, max-pool
-    each 17-frame clip with temporal stride 4 into 5 tokens (a regenerate
-    ``1.0`` wins over a preserve ``0.0``), then drop the last 3 tokens.
+    VAE's exact causal temporal structure: pad to a multiple of 17 frames,
+    then within each 17-frame clip map token 0 to frame 0 and token k
+    (k >= 1) to frames ``4k-3..4k``, then drop the last 3 tokens. A
+    regenerate ``1.0`` wins over a preserve ``0.0``.
 
-    This mirrors ``encode_temporal`` (``vae_clip_length == 17``,
-    ``vae_ratio_t == 4``, ``vae_token_drop == 3``); the token count is
-    ``ceil(num_frames / 17) * 5 - 3``, verified against the real VAE.
+    This mirrors ``encode_temporal``: the VAE downsamples time with two
+    stride-2 convs of kernel 3 and a causal left pad of 2
+    (``causal_encoder == True``), so ``vae_clip_length == 17``,
+    ``vae_ratio_t == 4``, ``vae_token_drop == 3``. The token count
+    ``ceil(num_frames / 17) * 5 - 3`` and the causal frame grouping were both
+    checked against the VAE source in the checkpoint.
     """
     clip = 17
     num_chunks = -(-mask.shape[0] // clip)  # ceil
@@ -394,8 +398,11 @@ def _temporal_group_max_pool(mask: torch.Tensor, *, latent_t: int) -> torch.Tens
     tokens: list[torch.Tensor] = []
     for c in range(num_chunks):
         chunk = mask[c * clip : (c + 1) * clip]
-        for start in range(0, clip, 4):
-            tokens.append(chunk[start : start + 4].amax(dim=0))
+        # Causal grouping: token 0 sees only frame 0; token k (k >= 1) sees
+        # frames 4k-3..4k (two stride-2 convs, kernel 3, causal left pad 2).
+        tokens.append(chunk[0:1].amax(dim=0))
+        for k in range(1, 5):
+            tokens.append(chunk[4 * k - 3 : 4 * k + 1].amax(dim=0))
     result = torch.stack(tokens)[:-3]  # drop the last 3 tokens
     if result.shape[0] != latent_t:
         raise OmniClientError(
