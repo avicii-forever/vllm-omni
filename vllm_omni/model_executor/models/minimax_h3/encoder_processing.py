@@ -370,22 +370,25 @@ def _resize_video_edit_mask(
 
 def _temporal_group_max_pool(mask: torch.Tensor, *, latent_t: int) -> torch.Tensor:
     """Max-pool ``[num_frames, H, W]`` -> ``[latent_t, H, W]`` following the
-    VAE's non-uniform frame grouping: the first 5 frames map to 2 latents, then
-    every 17 frames map to 5 latents.
+    VAE's exact temporal structure: pad to a multiple of 17 frames, max-pool
+    each 17-frame clip with temporal stride 4 into 5 tokens (a regenerate
+    ``1.0`` wins over a preserve ``0.0``), then drop the last 3 tokens.
 
-    Within each group the frames are split into contiguous chunks and max-pooled
-    (a regenerate ``1.0`` wins over a preserve ``0.0``). This mirrors the VAE's
-    batch structure (``preencode_batch_frames == 17`` and the 5-frame causal
-    warmup); the exact within-group frame->latent assignment lives in the
-    external VAE, so the chunk boundaries are an approximation.
+    This mirrors ``encode_temporal`` (``vae_clip_length == 17``,
+    ``vae_ratio_t == 4``, ``vae_token_drop == 3``); the token count is
+    ``ceil(num_frames / 17) * 5 - 3``, verified against the real VAE.
     """
-    pooled: list[torch.Tensor] = []
-    for chunk in torch.chunk(mask[:5], 2, dim=0):
-        pooled.append(chunk.amax(dim=0))
-    for start in range(5, mask.shape[0], 17):
-        for chunk in torch.chunk(mask[start : start + 17], 5, dim=0):
-            pooled.append(chunk.amax(dim=0))
-    result = torch.stack(pooled)
+    clip = 17
+    num_chunks = -(-mask.shape[0] // clip)  # ceil
+    padded = num_chunks * clip
+    if mask.shape[0] < padded:
+        mask = torch.cat([mask, mask[-1:].expand(padded - mask.shape[0], *mask.shape[1:])], dim=0)
+    tokens: list[torch.Tensor] = []
+    for c in range(num_chunks):
+        chunk = mask[c * clip : (c + 1) * clip]
+        for start in range(0, clip, 4):
+            tokens.append(chunk[start : start + 4].amax(dim=0))
+    result = torch.stack(tokens)[:-3]  # drop the last 3 tokens
     if result.shape[0] != latent_t:
         raise OmniClientError(
             f"MiniMax H3 video_noise_mask temporal depth {mask.shape[0]} does not map to {latent_t} latents"

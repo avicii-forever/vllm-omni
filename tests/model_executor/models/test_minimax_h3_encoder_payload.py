@@ -56,15 +56,14 @@ def test_edit_mask_resizes_raw_spatial_and_frame_space_masks() -> None:
     torch.testing.assert_close(spatial_grid, torch.full((7, 8, 12), 0.5))
 
     # Raw frame-space [T, H, W] with T == num_frames: max-pooled by the VAE's
-    # non-uniform grouping (first 5 frames -> 2 latents, then every 17 -> 5).
+    # temporal structure (pad to 17, stride-4 into 5 tokens, drop the last 3).
     frame_space = torch.zeros(22, 16, 24)
-    frame_space[7] = 1.0  # inside the first steady-state group (frames [5, 9))
+    frame_space[7] = 1.0  # stride 4: frame 7 -> token 1 (frames [4, 8))
     frame_grid = _canonical_video_edit_mask(frame_space, num_frames=22, **video_kwargs)
     assert frame_grid.shape == (7, 8, 12)
-    # The regenerate frame lands in latent index 2 (warmup covers latents 0, 1).
-    assert bool(torch.all(frame_grid[2] > 0.5).item())
+    # The regenerate frame lands in latent index 1.
+    assert bool(torch.all(frame_grid[1] > 0.5).item())
     assert bool(torch.all(frame_grid[0] == 0.0).item())
-    assert bool(torch.all(frame_grid[1] == 0.0).item())
 
 
 def test_edit_mask_resizes_raw_temporal_audio_masks() -> None:
