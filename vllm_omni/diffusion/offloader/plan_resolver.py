@@ -28,7 +28,7 @@ from vllm_omni.diffusion.models.interface import SupportsComponentDiscovery
 from .block_discovery import get_blocks_from_dit
 from .component_utils import get_encoder_block_groups, validate_on_demand_component
 from .config import DIT_COMPONENT, TEXT_ENCODER_COMPONENT, VAE_COMPONENT, OffloadStrategy
-from .module_collector import ModuleDiscovery, PipelineModules
+from .module_collector import ModuleDiscovery
 from .offload_plan import OffloadPlan, get_offload_plan
 
 if TYPE_CHECKING:

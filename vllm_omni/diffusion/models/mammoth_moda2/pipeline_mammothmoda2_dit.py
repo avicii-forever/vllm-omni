@@ -53,7 +53,7 @@ _MAMMOTHMODA2_CACHE_DIT_KEY = "mammothmoda2:cache_dit"
 
 
 def _first_request_value(value: object) -> object:
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list | tuple):
         return value[0] if value else None
     return value
 

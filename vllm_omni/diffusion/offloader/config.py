@@ -371,7 +371,7 @@ def materialize_legacy_offload_flags(config: Any) -> OffloadStrategy:
 
 def parse_offload_components(value: Collection[str]) -> frozenset[str]:
     """Validate an internal component collection."""
-    if isinstance(value, (str, Mapping)) or not isinstance(value, Collection):
+    if isinstance(value, str | Mapping) or not isinstance(value, Collection):
         raise TypeError("diffusion_offload_config.components must be a non-empty list of component names")
     if any(not isinstance(item, str) for item in value):
         raise TypeError("offload component entries must be strings")
