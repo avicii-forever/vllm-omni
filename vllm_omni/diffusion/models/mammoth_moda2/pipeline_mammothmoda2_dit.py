@@ -102,7 +102,11 @@ def _validate_module_offload_runtime(od_config: OmniDiffusionConfig, config: Mam
     component swapping.
     """
     resolved = resolve_offload(od_config)
-    if resolved.strategy is not OffloadStrategy.MODEL_LEVEL:
+    # Only the compact module-mode config (diffusion_offload_config mode=module)
+    # needs these runtime preconditions. The legacy enable_cpu_offload flag
+    # resolves to the same MODEL_LEVEL strategy but is handled by the generic
+    # resolve_offload_plan path, so it must not trip this gate.
+    if resolved.public is None or resolved.strategy is not OffloadStrategy.MODEL_LEVEL:
         return False
     if getattr(config.llm_config, "model_type", "") != "mammothmoda2_qwen2_5_vl":
         raise ValueError("MammothModa2 module-level offload is limited to Preview text-to-image, not Dev")
@@ -381,9 +385,7 @@ class MammothModa2DiTPipeline(nn.Module, SupportsComponentDiscovery):
         # defaults (which always populate extra_args) never shadow a user-supplied
         # guidance_scale / num_inference_steps.
         guidance = (
-            sampling.guidance_scale
-            if sampling.guidance_scale_provided
-            else extra_args.get("text_guidance_scale")
+            sampling.guidance_scale if sampling.guidance_scale_provided else extra_args.get("text_guidance_scale")
         )
         if guidance is None:
             guidance = _first_request_value(request_info.get("text_guidance_scale"))

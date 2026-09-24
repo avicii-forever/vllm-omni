@@ -129,6 +129,23 @@ def test_module_mode_admission_rejects_multi_request() -> None:
         _validate_module_offload_runtime(od_config, config)
 
 
+def test_legacy_cpu_offload_skips_module_admission() -> None:
+    # enable_cpu_offload=True resolves to the MODEL_LEVEL strategy but is the
+    # legacy path; it must not trip the module-mode admission checks (a Dev
+    # checkpoint with legacy CPU offload constructs fine).
+    od_config = _od_config(enable_cpu_offload=True)
+    config = SimpleNamespace(llm_config=SimpleNamespace(model_type=DEV_LLM_TYPE))
+    assert _validate_module_offload_runtime(od_config, config) is False
+
+
+def test_legacy_cpu_offload_multi_request_skips_module_admission() -> None:
+    # Legacy CPU offload with max_num_seqs=2 must not fail at construction; the
+    # multi-request restriction only applies to the compact module-mode config.
+    od_config = _od_config(enable_cpu_offload=True, max_num_seqs=2)
+    config = SimpleNamespace(llm_config=SimpleNamespace(model_type=PREVIEW_LLM_TYPE))
+    assert _validate_module_offload_runtime(od_config, config) is False
+
+
 def test_enable_model_offload_stages_dit_encoder_and_vae(monkeypatch) -> None:
     pipeline = _pipeline_shell()
     captured: dict[str, object] = {}
