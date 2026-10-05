@@ -30,7 +30,7 @@ from .format import (
     video_to_base64,
     video_to_bytes,
 )
-from .latent_mask import audio_mask_to_json, scalar_mask_to_json, video_mask_to_json
+from .latent_mask import scalar_mask_to_json, video_mask_to_json
 from .logger import get_logger, pretty_printer
 from .models import lookup_model_spec
 from .types import (
@@ -403,9 +403,8 @@ class VLLMOmniClient:
             source_audio = latent_edit.get("source_audio")
             video_mask = latent_edit.get("video_mask")
             audio_mask = latent_edit.get("audio_mask")
-            audio_temporal_mask = latent_edit.get("audio_temporal_mask")
 
-            if video_mask is None and audio_mask is None and audio_temporal_mask is None:
+            if video_mask is None and audio_mask is None:
                 raise ValueError("Latent-mask editing requires at least one mask.")
 
             if source_video is not None:
@@ -432,14 +431,7 @@ class VLLMOmniClient:
                     filename="video-mask.json",
                     content_type="application/json",
                 )
-            if audio_temporal_mask is not None:
-                form.add_field(
-                    "audio_noise_mask",
-                    audio_mask_to_json(audio_temporal_mask).encode("utf-8"),
-                    filename="audio-mask.json",
-                    content_type="application/json",
-                )
-            elif audio_mask is not None:
+            if audio_mask is not None:
                 form.add_field(
                     "audio_noise_mask",
                     scalar_mask_to_json(audio_mask).encode("utf-8"),

@@ -3,16 +3,22 @@
 
 """Client-side serialization of MiniMax-H3 latent-edit masks.
 
-A video mask is sent in its raw form — a 2D spatial ``[H, W]`` (applied to
-every frame) or a 3D frame-space ``[T, H, W]`` (one slice per source frame) —
-and the server resolves it to the latent grid. An audio mask is either a scalar
-(uniform, applied to all time steps) or a raw temporal ``[T]`` / channel-major
-``[C, T]`` mask, which the server resamples to its audio latent length.
+A video mask is sent in frame space — a 2D spatial ``[H, W]`` (applied to every
+frame) or a 3D ``[T, H, W]`` (one slice per frame) — and the server resolves it
+to the latent grid. An audio mask is a scalar applied to all time steps.
 """
 
 import json
+import math
 
 import torch
+import torch.nn.functional as F
+
+# The server rejects mask JSON above 8 MiB, so the spatial axes are
+# area-downsampled by the VAE spatial stride before upload. This depends only on
+# the stride, not on the H3 shape lattice, which the server still owns.
+_VAE_SPATIAL_STRIDE = 16
+_MASK_DECIMALS = 4
 
 
 def scalar_mask_to_json(value: float) -> str:
@@ -22,32 +28,26 @@ def scalar_mask_to_json(value: float) -> str:
 
 
 def video_mask_to_json(mask: torch.Tensor) -> str:
-    """Serialize a raw video mask to JSON for the ``video_noise_mask`` field.
+    """Serialize a frame-space video mask to JSON for the ``video_noise_mask`` field.
 
-    ``mask`` is a 2D spatial mask or a 3D frame-space mask. The server resizes
-    it to the latent grid, so the client neither floors the canvas nor maps
-    frames to latents.
+    ``mask`` is a 2D spatial mask or a 3D frame-space mask. Its spatial axes are
+    area-downsampled by the VAE stride; the server resizes the result to the
+    latent grid, so the client neither floors the canvas nor maps frames to
+    latents.
     """
     if mask.ndim not in (2, 3):
         raise ValueError(f"expected a 2D or 3D mask tensor, got {mask.ndim}D")
-    return json.dumps(mask.tolist(), separators=(",", ":"))
+    frames = mask.unsqueeze(0) if mask.ndim == 2 else mask
+    size = tuple(max(1, math.ceil(dim / _VAE_SPATIAL_STRIDE)) for dim in frames.shape[1:])
+    frames = F.interpolate(frames.unsqueeze(1).float(), size=size, mode="area").squeeze(1)
+    if mask.ndim == 2:
+        frames = frames.squeeze(0)
+    # Round in float64 so tolist() emits short decimals rather than float32 noise.
+    return json.dumps(frames.double().round(decimals=_MASK_DECIMALS).tolist(), separators=(",", ":"))
 
 
-def audio_mask_to_json(mask: torch.Tensor) -> str:
-    """Serialize a raw temporal audio mask to JSON for the ``audio_noise_mask``
-    field.
-
-    ``mask`` is a 1D temporal ``[T]`` mask (one value per time step) or a 2D
-    channel-major ``[C, T]`` mask. The server resamples the time axis to its
-    audio latent length and broadcasts a single channel to the stereo pair.
-    """
-    if mask.ndim not in (1, 2):
-        raise ValueError(f"expected a 1D or 2D mask tensor, got {mask.ndim}D")
-    return json.dumps(mask.tolist(), separators=(",", ":"))
-
-
-# The temporal-mask node computes its preserve/regenerate boundary on the H3
-# latent lattice for preview purposes; these mirror the server shape planner.
+# The temporal-mask node snaps its preserve boundary to the H3 frame lattice;
+# this mirrors the server shape planner.
 def _align_frame_count(frame_count: int) -> int:
     if frame_count <= 0:
         return 1
@@ -55,9 +55,3 @@ def _align_frame_count(frame_count: int) -> int:
     while current % 17 != 5:
         current += 1
     return current
-
-
-def _video_latent_t(frame_count: int) -> int:
-    if frame_count <= 5:
-        return 2
-    return ((int(frame_count) - 5) // 17) * 5 + 2
