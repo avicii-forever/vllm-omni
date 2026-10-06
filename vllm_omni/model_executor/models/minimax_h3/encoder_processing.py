@@ -294,7 +294,7 @@ def _canonical_video_edit_mask(
     latent_t: int,
     latent_h: int,
     latent_w: int,
-    num_frames: int | None = None,
+    num_frames: int,
 ) -> torch.Tensor:
     """Normalize every accepted request shape, including raw frame-space masks, to one full latent grid."""
     mask = _edit_mask(value, name="video_noise_mask")
@@ -311,12 +311,9 @@ def _canonical_video_edit_mask(
             return candidate.repeat_interleave(2, dim=1).repeat_interleave(2, dim=2).contiguous()
         if tuple(candidate.shape) == full_shape:
             return candidate.contiguous()
-        if candidate.ndim >= 1 and candidate.shape[0] == 1:
-            if candidate.ndim == 3 and candidate.shape[1] != 1:
-                break
-            candidate = candidate.squeeze(0)
-            continue
-        break
+        if not candidate.ndim or candidate.shape[0] != 1:
+            break
+        candidate = candidate.squeeze(0)
     if candidate.ndim in (2, 3):
         return _resize_video_edit_mask(
             candidate,
@@ -337,37 +334,18 @@ def _resize_video_edit_mask(
     latent_t: int,
     latent_h: int,
     latent_w: int,
-    num_frames: int | None = None,
+    num_frames: int,
 ) -> torch.Tensor:
     """Resize a raw ``[H, W]`` or frame-space ``[T, H, W]`` mask to ``[latent_t, latent_h, latent_w]``."""
     if mask.ndim == 2:
         mask = mask.unsqueeze(0)
     grid = torch.nn.functional.interpolate(mask.unsqueeze(1), size=(latent_h, latent_w), mode="area").squeeze(1)
     if grid.shape[0] == 1:
-        grid = grid.expand(latent_t, latent_h, latent_w)
-    elif num_frames is not None:
-        # Fit to the output length the way the source video is fitted, so the edit boundary does not drift.
-        if grid.shape[0] < num_frames:
-            pad = grid[-1:].expand(num_frames - grid.shape[0], *grid.shape[1:])
-            grid = torch.cat([grid, pad], dim=0)
-        elif grid.shape[0] > num_frames:
-            grid = grid[:num_frames]
-        grid = _temporal_group_max_pool(grid, latent_t=latent_t)
-    elif grid.shape[0] > latent_t:
-        grid = (
-            torch.nn.functional.adaptive_max_pool3d(grid[None, None], (latent_t, latent_h, latent_w))
-            .squeeze(0)
-            .squeeze(0)
-        )
-    elif grid.shape[0] < latent_t:
-        grid = (
-            torch.nn.functional.interpolate(
-                grid.unsqueeze(0).unsqueeze(0), size=(latent_t, latent_h, latent_w), mode="nearest"
-            )
-            .squeeze(0)
-            .squeeze(0)
-        )
-    return grid.contiguous()
+        return grid.expand(latent_t, latent_h, latent_w).contiguous()
+    # Fit to the output length the way the source video is fitted, so the edit boundary does not drift.
+    if grid.shape[0] < num_frames:
+        grid = torch.cat([grid, grid[-1:].expand(num_frames - grid.shape[0], *grid.shape[1:])], dim=0)
+    return _temporal_group_max_pool(grid[:num_frames], latent_t=latent_t)
 
 
 def _temporal_group_max_pool(mask: torch.Tensor, *, latent_t: int) -> torch.Tensor:
